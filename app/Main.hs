@@ -5,7 +5,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Main where
+module Main (main) where
 
 import           Control.Applicative             (Alternative(..), (<|>))
 import           Control.Applicative.MultiExcept
@@ -134,14 +134,6 @@ printSizePaths n path nextPath
       <> printIndent n
       <> "    printf(\"// nextPath: " <> nextPath <> "\\n\");\n"
 
-getFieldPaths :: Field -> [String]
-getFieldPaths = \case
-  -- relatively opaque type
-  FieldNamed{..} -> [name]
-  FieldAnonymousStruct{..} -> concatMap getFieldPaths inner
-  FieldNamedStruct{..} ->
-    name : concatMap (fmap (name <>) . getFieldPaths) inner
-
 debugStruct :: Struct -> String
 debugStruct (Struct s fields)
   =  "  {\n"
@@ -157,9 +149,6 @@ debugStruct (Struct s fields)
 
     nextPath :: String
     nextPath = structName <> "[1]"
-
-    fieldPaths :: [String]
-    fieldPaths = concatMap getFieldPaths fields
 
 printIndent :: Int -> String
 printIndent 0 = ""
