@@ -9,12 +9,10 @@ module Main (main) where
 
 import           Control.Applicative             (Alternative(..), (<|>))
 import           Control.Applicative.MultiExcept
-import           Control.Arrow                   (first)
 import           Control.Exception               (bracket)
 import qualified Data.ByteString                 as B
 import qualified Data.ByteString.UTF8            as BSU
 import qualified Data.DList.NonEmpty             as DNE
-import           Data.DList.NonEmpty             (NonEmptyDList)
 import           Data.Foldable                   (traverse_)
 import           Data.List                       (scanl', foldl', intercalate)
 import           Data.List.NonEmpty              (NonEmpty(..))
@@ -92,8 +90,7 @@ run Handles{..} = do
   dir <- getCurrentDirectory
   putStrLn $ "Using C compiler ($CC): " <> cc
   preprocessed <- readProcess "cc" ["-std=c11", "-E", "-"] source
-  let ast = parseC (BSU.fromString preprocessed) $ initPos "stdin"
-  case ast of
+  case parseC (BSU.fromString preprocessed) $ initPos "stdin" of
     Left err -> hPrint stderr err
     Right ast -> case runMultiExcept $ getStructsFromTranslUnit ast of
       Left errs -> traverse_ (hPrint stderr) errs
@@ -164,7 +161,9 @@ firstPath :: Field -> Maybe String
 firstPath = \case
   FieldNamed{..} -> pure name
   FieldAnonymousStruct{..} -> altMap firstPath inner
+  FieldAnonymousUnion{..} -> altMap firstPath inner
   FieldNamedStruct{..} -> pure name
+  FieldNamedUnion{..} -> pure name
 
 (<.>) :: String -> String -> String
 (<.>) a b = a <> "." <> b
@@ -183,6 +182,10 @@ printSubs n path nextPath fields =
     fieldFirsts :: [Maybe String]
     fieldFirsts = fmap (path <.>) . firstPath <$> fields
 
+printSubsUnion :: Int -> String -> String -> [Field] -> String
+printSubsUnion n path nextPath fields =
+  concatMap (debugField (n + 2) path nextPath) fields 
+
 debugField :: Int -> String -> String -> Field -> String
 debugField n path nextPath = \case
   (FieldNamed name ts) ->
@@ -194,11 +197,24 @@ debugField n path nextPath = \case
     printIndent n
     <> "    puts(\"struct {\");\n"
     <> printSubs n path nextPath inner
+    <> printIndent n
     <> "    puts(\"};\");\n"
   FieldNamedStruct{..} ->
     printIndent n
     <> "    puts(\"struct {\");\n"
     <> printSubs n (path <.> name) nextPath inner
+    <> printIndent n
+    <> "    puts(\"} " <> name <> ";\");\n"
+  FieldAnonymousUnion{..} ->
+    printIndent n
+    <> "    puts(\"union {\");\n"
+    <> printSubsUnion n path nextPath inner
+    <> printIndent n
+    <> "    puts(\"};\");\n"
+  FieldNamedUnion{..} ->
+    printIndent n
+    <> "    puts(\"union {\");\n"
+    <> printSubsUnion n (path <.> name) nextPath inner
     <> printIndent n
     <> "    puts(\"} " <> name <> ";\");\n"
 
@@ -250,11 +266,14 @@ getFieldsFromDecl (CDecl specs trips _) =
       pure $ case names of
         [] -> [FieldAnonymousStruct fields]
         ns -> flip FieldNamedStruct fields <$> ns
+    Just (CSUType (CStruct CUnionTag _ Nothing _ _) _) -> pure $ case names of
+      [] -> [FieldAnonymousUnion []]
+      ns -> flip FieldNamedUnion [] <$> ns
     Just (CSUType (CStruct CUnionTag _ (Just decls) _ _) _) -> do
       fields <- concat <$> traverse getFieldsFromDecl decls
       pure $ case names of
-        [] -> [FieldAnonymousStruct fields]
-        ns -> flip FieldNamedStruct fields <$> ns
+        [] -> [FieldAnonymousUnion fields]
+        ns -> flip FieldNamedUnion fields <$> ns
     Just t -> case names of
       [] -> trace (show t) $ throwError $ NonStructFieldWithoutName
       ns -> pure $ flip FieldNamed t <$> ns
