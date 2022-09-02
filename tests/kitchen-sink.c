@@ -18,3 +18,7 @@ struct root {
   } h;
   size_t i;
 };
+
+typedef struct {
+  int a;
+} td;
