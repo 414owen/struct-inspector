@@ -16,6 +16,7 @@ import qualified Data.DList.NonEmpty             as DNE
 import           Data.Foldable                   (traverse_)
 import           Data.List                       (scanl', foldl', intercalate)
 import           Data.List.NonEmpty              (NonEmpty(..))
+import           Data.Maybe                      (catMaybes)
 import           Language.C
 import           Language.C.Data.Ident
 import           System.Directory                (getCurrentDirectory)
@@ -24,8 +25,6 @@ import           System.FilePath                 ((</>))
 import           System.IO
 import           System.Process
 import qualified Text.PrettyPrint                as PP
-
-import Debug.Trace
 
 data Field
   = FieldNamed
@@ -131,14 +130,14 @@ printSizePaths n path nextPath
       <> printIndent n
       <> "    printf(\"// nextPath: " <> nextPath <> "\\n\");\n"
 
-debugStruct :: Struct -> String
-debugStruct (Struct s fields)
+debugStruct' :: Bool -> String -> [Field] -> String
+debugStruct' istypedef s fields
   =  "  {\n"
-  <> "    struct " <> s <> " " <> structName <> "[2];\n"
+  <> decl
   <> printSizePaths 0 path nextPath
-  <> "    puts(\"struct " <> s <> " {\");\n"
+  <> start
   <> printSubs 0 path nextPath fields
-  <> "    puts(\"};\\n\");\n"
+  <> end
   <> "  }\n"
   where
     path :: String
@@ -146,6 +145,25 @@ debugStruct (Struct s fields)
 
     nextPath :: String
     nextPath = structName <> "[1]"
+
+    decl :: String
+    decl = if istypedef
+      then ("    " <> s <> " " <> structName <> "[2];\n")
+      else ("    struct " <> s <> " " <> structName <> "[2];\n")
+
+    start :: String
+    start = if istypedef
+      then "    puts(\"typedef struct {\");\n"
+      else "    puts(\"struct " <> s <> " {\");\n"
+
+    end :: String
+    end = if istypedef
+      then "    puts(\"} " <> s <> ";\\n\");\n"
+      else "    puts(\"};\\n\");\n"
+
+debugStruct :: Struct -> String
+debugStruct (Struct s fs) = debugStruct' False s fs
+debugStruct (TypedefStruct s fs) = debugStruct' True s fs
 
 printIndent :: Int -> String
 printIndent 0 = ""
@@ -226,22 +244,39 @@ getStructsFromExtDecl (CDeclExt a) = getStructsFromDecl a
 getStructsFromExtDecl _ = pure []
 
 getStructsFromDecl :: CDeclaration NodeInfo -> QM [Struct]
-getStructsFromDecl (CDecl a _ _) = concat <$> traverse getStructsFromDeclSpec a
+getStructsFromDecl (CDecl specs decs _) =
+  concat <$> traverse (flip getStructsFromDeclSpec $ getTypedef specs decs) specs
 getStructsFromDecl _ = pure []
 
-getStructsFromDeclSpec :: CDeclarationSpecifier NodeInfo -> QM [Struct]
+getTypedef :: [CDeclSpec] -> [(Maybe CDeclr, b, c)] -> Maybe String
+getTypedef specs decls
+  | any isTd specs = altMap getName $ catMaybes $ fst3 <$> decls
+  | otherwise = Nothing
+  where
+    isTd :: CDeclSpec -> Bool
+    isTd (CStorageSpec (CTypedef _)) = True
+    isTd _ = False
+
+    getName :: CDeclr -> Maybe String
+    getName (CDeclr (Just (Ident s _ _)) _ _ _ _) = Just s
+    getName _ = Nothing
+
+getStructsFromDeclSpec :: CDeclSpec -> Maybe String -> QM [Struct]
 getStructsFromDeclSpec (CTypeSpec a) = getStructsFromCTypeSpec a
-getStructsFromDeclSpec _ = pure []
+getStructsFromDeclSpec _ = const $ pure []
 
-getStructsFromCTypeSpec :: CTypeSpec -> QM [Struct]
+getStructsFromCTypeSpec :: CTypeSpec -> Maybe String -> QM [Struct]
 getStructsFromCTypeSpec (CSUType su _) = getStructsFromCSU su
-getStructsFromCTypeSpec _ = pure []
+getStructsFromCTypeSpec _ = const $ pure []
 
-getStructsFromCSU :: CStructureUnion NodeInfo -> QM [Struct]
-getStructsFromCSU (CStruct CStructTag (Just (Ident s _ _)) Nothing _ _) = pure $ [Struct s []]
-getStructsFromCSU (CStruct CStructTag (Just (Ident s _ _)) (Just decls) _ _)
+getStructsFromCSU :: CStructureUnion NodeInfo -> Maybe String -> QM [Struct]
+getStructsFromCSU (CStruct CStructTag _ Nothing _ _) (Just s) = pure $ [TypedefStruct s []]
+getStructsFromCSU (CStruct CStructTag (Just (Ident s _ _)) Nothing _ _) Nothing = pure $ [Struct s []]
+getStructsFromCSU (CStruct CStructTag (Just (Ident s _ _)) (Just decls) _ _) Nothing
   = pure . Struct s <$> concat <$> traverse getFieldsFromDecl decls
-getStructsFromCSU _ = pure []
+getStructsFromCSU (CStruct CStructTag _ (Just decls) _ _) (Just s)
+  = pure . TypedefStruct s <$> concat <$> traverse getFieldsFromDecl decls
+getStructsFromCSU _ _ = pure []
 
 fst3 :: (a, b, c) -> a
 fst3 (a, _, _) = a
@@ -275,7 +310,7 @@ getFieldsFromDecl (CDecl specs trips _) =
         [] -> [FieldAnonymousUnion fields]
         ns -> flip FieldNamedUnion fields <$> ns
     Just t -> case names of
-      [] -> trace (show t) $ throwError $ NonStructFieldWithoutName
+      [] -> throwError $ NonStructFieldWithoutName
       ns -> pure $ flip FieldNamed t <$> ns
 getFieldsFromDecl _ = pure []
 
