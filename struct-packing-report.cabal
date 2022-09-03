@@ -35,5 +35,9 @@ executable struct-packing-report
                     , pretty
                     , multi-except
                     , dlist-nonempty
+                    , process
+                    , directory
+                    , filepath
+                    , utf8-string
     hs-source-dirs:   app
     default-language: Haskell2010
