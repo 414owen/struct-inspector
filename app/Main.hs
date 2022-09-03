@@ -1,4 +1,6 @@
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
@@ -9,6 +11,7 @@ import qualified Data.ByteString as B
 import qualified Data.DList.NonEmpty as DNE
 import Data.DList.NonEmpty (NonEmptyDList)
 import Data.List (foldl')
+import Data.List.NonEmpty (NonEmpty(..))
 import Language.C
 import Language.C.Data.Ident
 
@@ -33,8 +36,8 @@ data Struct
   } deriving Show
 
 data QueryErr
-  = FieldWithoutType [String]
-  | FieldWithoutName
+  = FieldWithoutType String
+  | NonStructFieldWithoutName
   deriving Show
 
 type QM = MultiExcept QueryErr
@@ -85,17 +88,25 @@ getFieldsFromDecl :: CDeclaration NodeInfo -> QM [Field]
 getFieldsFromDecl (CDecl specs trips _) =
   let names = concatMap (getFieldsFromDeclarators . fst3) trips
       typeNode = getTypeFromDeclSpecs specs
-  in case (typeNode, names) of
+  in case typeNode of
+    Nothing -> case names of
     -- I really hope this never happens
-    (Nothing, []) -> throwError $ FieldWithoutType []
-    (Nothing, (a : _)) -> throwError $ FieldWithoutType [a]
+      [] -> throwError $ FieldWithoutType []
+      x : xs -> throwErrors
+        $ DNE.fromNonEmpty
+        $ FieldWithoutType <$> (x :| xs)
     -- TODO test whether we need struct name here
-    (Just (CSUType (CStruct CStructTag _ Nothing _ _) _), []) ->
-      pure $ [FieldAnonymousStruct []]
-    (Just (CSUType (CStruct CStructTag _ (Just decls) _ _) _), []) ->
-      fmap (pure . FieldAnonymousStruct . concat)
-        $ traverse getFieldsFromDecl decls
-    (Just t, ns) -> pure 
+    Just (CSUType (CStruct CStructTag _ Nothing _ _) _) -> pure $ case names of
+      [] -> [FieldAnonymousStruct []]
+      ns -> flip FieldNamedStruct [] <$> ns
+    Just (CSUType (CStruct CStructTag _ (Just decls) _ _) _) -> do
+      fields <- concat <$> traverse getFieldsFromDecl decls
+      pure $ case names of
+        [] -> [FieldAnonymousStruct fields]
+        ns -> flip FieldNamedStruct fields <$> ns
+    Just t -> case names of
+      [] -> throwError $ NonStructFieldWithoutName
+      ns -> pure $ flip FieldNamed t <$> ns
 getFieldsFromDecl _ = pure []
 
 getTypeFromDeclSpecs :: [CDeclarationSpecifier NodeInfo] -> Maybe CTypeSpec
