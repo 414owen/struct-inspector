@@ -1,22 +1,33 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
-import Control.Applicative ((<|>))
-import Control.Applicative.MultiExcept
-import Control.Arrow (first)
-import qualified Data.ByteString as B
-import qualified Data.DList.NonEmpty as DNE
-import Data.DList.NonEmpty (NonEmptyDList)
-import Data.Foldable (traverse_)
-import Data.List (foldl')
-import Data.List.NonEmpty (NonEmpty(..))
-import Language.C
-import Language.C.Data.Ident
-import System.IO
+import           Control.Applicative             (Alternative(..), (<|>))
+import           Control.Applicative.MultiExcept
+import           Control.Arrow                   (first)
+import           Control.Exception               (bracket)
+import qualified Data.ByteString                 as B
+import qualified Data.ByteString.UTF8            as BSU
+import qualified Data.DList.NonEmpty             as DNE
+import           Data.DList.NonEmpty             (NonEmptyDList)
+import           Data.Foldable                   (traverse_)
+import           Data.List                       (scanl', foldl', intercalate)
+import           Data.List.NonEmpty              (NonEmpty(..))
+import           Language.C
+import           Language.C.Data.Ident
+import           System.Directory                (getCurrentDirectory)
+import           System.Environment
+import           System.FilePath                 ((</>))
+import           System.IO
+import           System.Process
+import qualified Text.PrettyPrint                as PP
+
+import Debug.Trace
 
 data Field
   = FieldNamed
@@ -30,13 +41,26 @@ data Field
     { name :: String
     , inner :: [Field]
     }
+  | FieldAnonymousUnion
+    { inner :: [Field]
+    }
+  | FieldNamedUnion
+    { name :: String
+    , inner :: [Field]
+    }
   deriving Show
 
 data Struct
   = Struct
-  { name :: String
-  , fields :: [Field]
-  } deriving Show
+    { name :: String
+    , fields :: [Field]
+    }
+  -- TODO
+  | TypedefStruct
+    { name :: String
+    , fields :: [Field]
+    }
+  deriving Show
 
 data QueryErr
   = FieldWithoutType String
@@ -54,17 +78,35 @@ data Handles
 main :: IO ()
 main = run $ Handles stdin stdout
 
+cFile :: FilePath
+cFile = ".struct.debug.c"
+
+cPrelude :: B.ByteString
+cPrelude = "#include <stdio.h>\n\n"
+  <> "// End of prelude\n\n"
+
 run :: Handles -> IO ()
 run Handles{..} = do
-  source <- B.hGetContents input
-  let ast = parseC source $ initPos "stdin"
+  source <- hGetContents input
+  cc <- getEnv "CC"
+  dir <- getCurrentDirectory
+  putStrLn $ "Using C compiler ($CC): " <> cc
+  preprocessed <- readProcess "cc" ["-std=c11", "-E", "-"] source
+  let ast = parseC (BSU.fromString preprocessed) $ initPos "stdin"
   case ast of
     Left err -> hPrint stderr err
     Right ast -> case runMultiExcept $ getStructsFromTranslUnit ast of
       Left errs -> traverse_ (hPrint stderr) errs
       Right structs -> do
-        B.hPut output source
-        hPutStrLn output $ mkDebugger structs
+        bracket (openFile cFile WriteMode) hClose $ \handle -> do
+          B.hPut handle cPrelude
+          hPutStrLn handle source
+          hPutStrLn handle $ mkDebugger structs
+        callCommand $ intercalate " "
+          [ cc
+          , cFile
+          ]
+        callProcess (dir </> "a.out") []
 
 mkDebugger :: [Struct] -> String
 mkDebugger structs
@@ -72,15 +114,104 @@ mkDebugger structs
   <> concatMap debugStruct structs
   <> "}"
 
+structName :: String
+structName = "__s"
+
+debugPrint :: Bool
+debugPrint = False
+
+printSizePaths :: Int -> String -> String -> String
+printSizePaths n path nextPath
+   =  printIndent n
+   <> "    printf(\"// sizeof: %zu\\n\", sizeof(" <> path <> "));\n"
+   <> printIndent n
+   <> "    printf(\"// uses: %zu\\n\", ((size_t)&" <> nextPath <> ") - ((size_t)&" <> path <> "));\n"
+   <> if not debugPrint then "" else db
+  where
+    db :: String
+    db = printIndent n
+      <> "    printf(\"// path: " <> path <> "\\n\");\n"
+      <> printIndent n
+      <> "    printf(\"// nextPath: " <> nextPath <> "\\n\");\n"
+
+getFieldPaths :: Field -> [String]
+getFieldPaths = \case
+  -- relatively opaque type
+  FieldNamed{..} -> [name]
+  FieldAnonymousStruct{..} -> concatMap getFieldPaths inner
+  FieldNamedStruct{..} ->
+    name : concatMap (fmap (name <>) . getFieldPaths) inner
+
 debugStruct :: Struct -> String
 debugStruct (Struct s fields)
-  =  "  printf(\"// %zu bytes\\n\", sizeof(" <> s <> "));\n"
-  <> "  puts(\"struct " <> s <> " {\");\n"
-  <> concatMap (debugField 4) fields
-  <> "  puts(\"}\\n\");\n"
+  =  "  {\n"
+  <> "    struct " <> s <> " " <> structName <> "[2];\n"
+  <> printSizePaths 0 path nextPath
+  <> "    puts(\"struct " <> s <> " {\");\n"
+  <> printSubs 0 path nextPath fields
+  <> "    puts(\"};\\n\");\n"
+  <> "  }\n"
+  where
+    path :: String
+    path = structName <> "[0]"
 
-debugField :: Int -> a -> String
-debugField _ _ = ""
+    nextPath :: String
+    nextPath = structName <> "[1]"
+
+    fieldPaths :: [String]
+    fieldPaths = concatMap getFieldPaths fields
+
+printIndent :: Int -> String
+printIndent 0 = ""
+printIndent n = "    printf(\"%" <> show n <> "s\", \"\");\n"
+
+altList :: (Foldable f, Alternative a) => f (a b) -> a b
+altList = foldl' (<|>) empty
+
+altMap :: (Functor f, Foldable f, Alternative a) => (b -> a c) -> f b -> a c
+altMap f = altList . fmap f
+
+firstPath :: Field -> Maybe String
+firstPath = \case
+  FieldNamed{..} -> pure name
+  FieldAnonymousStruct{..} -> altMap firstPath inner
+  FieldNamedStruct{..} -> pure name
+
+(<.>) :: String -> String -> String
+(<.>) a b = a <> "." <> b
+
+printSubs :: Int -> String -> String -> [Field] -> String
+printSubs n path nextPath fields =
+  concat $ zipWith (flip (debugField (n + 2) path)) fields nexts
+  where
+    nexts :: [String]
+    nexts = reverse $ scanl' f nextPath $ reverse $ tail $ fieldFirsts
+
+    f :: String -> Maybe String -> String
+    f _ (Just a) = a
+    f a Nothing = a
+
+    fieldFirsts :: [Maybe String]
+    fieldFirsts = fmap (path <.>) . firstPath <$> fields
+
+debugField :: Int -> String -> String -> Field -> String
+debugField n path nextPath = \case
+  (FieldNamed name ts) ->
+    let newPath = path <.> name
+     in printSizePaths n newPath nextPath
+       <> printIndent n
+       <> "    printf(\"" <> PP.render (pretty ts) <> " " <> name <> ";\\n\");"
+  FieldAnonymousStruct{..} ->
+    printIndent n
+    <> "    puts(\"struct {\");\n"
+    <> printSubs n path nextPath inner
+    <> "    puts(\"};\");\n"
+  FieldNamedStruct{..} ->
+    printIndent n
+    <> "    puts(\"struct {\");\n"
+    <> printSubs n (path <.> name) nextPath inner
+    <> printIndent n
+    <> "    puts(\"} " <> name <> ";\");\n"
 
 getStructsFromTranslUnit :: CTranslUnit -> QM [Struct]
 getStructsFromTranslUnit (CTranslUnit decls _) = concat <$> traverse getStructsFromExtDecl decls
@@ -105,6 +236,7 @@ getStructsFromCSU :: CStructureUnion NodeInfo -> QM [Struct]
 getStructsFromCSU (CStruct CStructTag (Just (Ident s _ _)) Nothing _ _) = pure $ [Struct s []]
 getStructsFromCSU (CStruct CStructTag (Just (Ident s _ _)) (Just decls) _ _)
   = pure . Struct s <$> concat <$> traverse getFieldsFromDecl decls
+getStructsFromCSU _ = pure []
 
 fst3 :: (a, b, c) -> a
 fst3 (a, _, _) = a
@@ -129,8 +261,13 @@ getFieldsFromDecl (CDecl specs trips _) =
       pure $ case names of
         [] -> [FieldAnonymousStruct fields]
         ns -> flip FieldNamedStruct fields <$> ns
+    Just (CSUType (CStruct CUnionTag _ (Just decls) _ _) _) -> do
+      fields <- concat <$> traverse getFieldsFromDecl decls
+      pure $ case names of
+        [] -> [FieldAnonymousStruct fields]
+        ns -> flip FieldNamedStruct fields <$> ns
     Just t -> case names of
-      [] -> throwError $ NonStructFieldWithoutName
+      [] -> trace (show t) $ throwError $ NonStructFieldWithoutName
       ns -> pure $ flip FieldNamed t <$> ns
 getFieldsFromDecl _ = pure []
 
