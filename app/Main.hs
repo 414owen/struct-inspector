@@ -1,5 +1,6 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
@@ -10,10 +11,12 @@ import Control.Arrow (first)
 import qualified Data.ByteString as B
 import qualified Data.DList.NonEmpty as DNE
 import Data.DList.NonEmpty (NonEmptyDList)
+import Data.Foldable (traverse_)
 import Data.List (foldl')
 import Data.List.NonEmpty (NonEmpty(..))
 import Language.C
 import Language.C.Data.Ident
+import System.IO
 
 data Field
   = FieldNamed
@@ -42,23 +45,45 @@ data QueryErr
 
 type QM = MultiExcept QueryErr
 
-main :: IO ()
-main = do
-  input <- B.getContents
-  let ast = parseC input $ initPos "stdin"
-  case ast of
-    Left err -> print err
-    Right ast -> print $ getStructsFromTranslUnit ast
+data Handles
+  = Handles
+  { input  :: Handle
+  , output :: Handle
+  }
 
-mkDebugger :: Struct -> String
-mkDebugger (Struct s fields)
-  =  "int main(void) {"
-  <> "  printf(\"sizeof " <> s <> ": %zu\n\", sizeof(" <> s <> "));"
+main :: IO ()
+main = run $ Handles stdin stdout
+
+run :: Handles -> IO ()
+run Handles{..} = do
+  source <- B.hGetContents input
+  let ast = parseC source $ initPos "stdin"
+  case ast of
+    Left err -> hPrint stderr err
+    Right ast -> case runMultiExcept $ getStructsFromTranslUnit ast of
+      Left errs -> traverse_ (hPrint stderr) errs
+      Right structs -> do
+        B.hPut output source
+        hPutStrLn output $ mkDebugger structs
+
+mkDebugger :: [Struct] -> String
+mkDebugger structs
+  =  "int main(void) {\n"
+  <> concatMap debugStruct structs
   <> "}"
+
+debugStruct :: Struct -> String
+debugStruct (Struct s fields)
+  =  "  printf(\"// %zu bytes\\n\", sizeof(" <> s <> "));\n"
+  <> "  puts(\"struct " <> s <> " {\");\n"
+  <> concatMap (debugField 4) fields
+  <> "  puts(\"}\\n\");\n"
+
+debugField :: Int -> a -> String
+debugField _ _ = ""
 
 getStructsFromTranslUnit :: CTranslUnit -> QM [Struct]
 getStructsFromTranslUnit (CTranslUnit decls _) = concat <$> traverse getStructsFromExtDecl decls
-getStructsFromTranslUnit _ = pure []
 
 getStructsFromExtDecl :: CExtDecl -> QM [Struct]
 getStructsFromExtDecl (CDeclExt a) = getStructsFromDecl a
