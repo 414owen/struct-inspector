@@ -52,7 +52,6 @@ data Struct
     { name :: String
     , fields :: [Field]
     }
-  -- TODO
   | TypedefStruct
     { name :: String
     , fields :: [Field]
