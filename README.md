@@ -24,18 +24,14 @@ $ cat test.c | cabal v2-run struct-inspector -- --padding
 
 ```
 // sizeof: 24
-// uses: 24
 struct a {
   struct {
-    // sizeof: 4
-    // uses: 8
+    // padding: 4
     int e;
   } d;
-  // sizeof: 8
-  // uses: 8
+  // padding: 0
   size_t b;
-  // sizeof: 4
-  // uses: 8
+  // padding: 4
   int c;
 };
 ```
@@ -49,18 +45,14 @@ struct a {
 
 ```
 // sizeof: 16
-// uses: 16
 struct a {
-  // sizeof: 8
-  // uses: 8
+  // padding: 0
   size_t b;
   struct {
-    // sizeof: 4
-    // uses: 4
+    // padding: 0
     int e;
   } d;
-  // sizeof: 4
-  // uses: 4
+  // padding: 0
   int c;
 };
 ```
