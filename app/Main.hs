@@ -17,7 +17,7 @@ import qualified Data.DList.NonEmpty             as DNE
 import           Data.Foldable                   (traverse_)
 import           Data.List                       (scanl', foldl', intercalate)
 import           Data.List.NonEmpty              (NonEmpty(..))
-import           Data.Maybe                      (catMaybes)
+import           Data.Maybe                      (catMaybes, isJust)
 import           Language.C
 import           Language.C.Data.Ident
 import           Options.Applicative             (Parser)
@@ -360,7 +360,17 @@ getStructsFromCTypeSpec :: CTypeSpec -> Maybe String -> QM [Struct]
 getStructsFromCTypeSpec (CSUType su _) = getStructsFromCSU su
 getStructsFromCTypeSpec _ = const $ pure []
 
-getStructsFromCSU :: CStructureUnion NodeInfo -> Maybe String -> QM [Struct]
+hasParent :: NodeInfo -> Bool
+hasParent = \case
+  OnlyPos pos _ -> f pos
+  NodeInfo pos _ _ -> f pos
+  where
+    f :: Position -> Bool
+    f pos = isJust $ posParent pos
+
+getStructsFromCSU :: CStructUnion -> Maybe String -> QM [Struct]
+getStructsFromCSU (CStruct _ _ _ _ ni) _
+  | hasParent ni = pure []
 getStructsFromCSU (CStruct CStructTag _ Nothing _ _) (Just s) = pure $ [TypedefStruct s []]
 getStructsFromCSU (CStruct CStructTag (Just (Ident s _ _)) Nothing _ _) Nothing = pure $ [Struct s []]
 getStructsFromCSU (CStruct CStructTag (Just (Ident s _ _)) (Just decls) _ _) Nothing
