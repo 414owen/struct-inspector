@@ -1,5 +1,5 @@
 cabal-version:      2.4
-name:               struct-packing-report
+name:               struct-inspector
 version:            0.1.0.0
 author:             Owen Shepherd
 maintainer:         owen@owen.cafe
