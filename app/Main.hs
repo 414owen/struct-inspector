@@ -191,7 +191,11 @@ cPrelude Env{options = Options{..}} = B.intercalate "\n"
       , ("BOLDCYAN", "\"\\033[1m\\033[36m\"")
       , ("BOLDWHITE", "\"\\033[1m\\033[37m\"")
       ]
-  
+
+getEnvDef :: String -> String -> IO String
+getEnvDef def env = flip fmap (lookupEnv env) $ \case
+  Nothing -> def
+  Just a -> a
 
 run :: Env -> IO ()
 run env@Env{handles = Handles{..}} = do
@@ -199,7 +203,9 @@ run env@Env{handles = Handles{..}} = do
   cc <- getEnv "CC"
   dir <- getCurrentDirectory
   -- putStrLn $ "Using C compiler ($CC): " <> cc
-  preprocessed <- readProcess "cc" ["-std=c11", "-E", "-"] source
+  cpath <- getEnvDef "" "CPATH"
+  includePath <- getEnvDef "" "C_INCLUDE_PATH"
+  preprocessed <- readProcess "cc" ["-std=c11", "-E", "-", "-I" <> cpath, "-I" <> includePath] source
   case parseC (BSU.fromString preprocessed) $ initPos "stdin" of
     Left err -> hPrint stderr err
     Right ast -> case runMultiExcept $ getStructsFromTranslUnit ast of
