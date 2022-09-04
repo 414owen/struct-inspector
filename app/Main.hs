@@ -1,6 +1,7 @@
 {-# LANGUAGE ApplicativeDo         #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE RecordWildCards       #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
@@ -11,6 +12,7 @@ import           Control.Arrow (second)
 import           Control.Applicative             (Alternative(..), (<|>), (<**>))
 import           Control.Applicative.MultiExcept
 import           Control.Exception               (bracket)
+import           Control.Monad                   (unless)
 import qualified Data.ByteString                 as B
 import qualified Data.ByteString.UTF8            as BSU
 import qualified Data.DList.NonEmpty             as DNE
@@ -35,7 +37,20 @@ data Options
   , uses    :: Bool
   , padding :: Bool
   , noColor :: Bool
+  , inFile  :: FilePath
   } deriving Show
+
+data Handles
+  = Handles
+  { input  :: Handle
+  , output :: Handle
+  }
+
+data Env
+  = Env
+  { options :: Options
+  , handles :: Handles
+  }
 
 optionsParser :: Parser Options
 optionsParser = Options
@@ -51,6 +66,12 @@ optionsParser = Options
   <*> O.switch
     ( O.long "no-color"
     <> O.help "Don't output color")
+  <*> O.strOption
+    ( O.long "input"
+    <> O.metavar "FILE"
+    <> O.help "Input file (default is stdin)"
+    <> O.value "-"
+    )
 
 getOptions :: IO Options
 getOptions = O.execParser optInfo
@@ -60,6 +81,35 @@ optInfo = O.info (optionsParser <**> O.helper)
   ( O.fullDesc
   <> O.progDesc "Print structure padding and field size info"
   <> O.header "Struct Inspector" )
+
+failWithHelp :: B.ByteString -> IO a
+failWithHelp str = do
+  B.putStr "Error: "
+  B.putStr str
+  B.putStr "\n\n"
+  O.handleParseResult . O.Failure $ O.parserFailure pprefs optInfo (O.ShowHelpText Nothing) mempty
+
+anyInfo :: Options -> Bool
+anyInfo Options{..} = or debug
+  where
+    debug :: [Bool]
+    debug = [padding, uses, sizeof]
+
+pprefs :: O.ParserPrefs
+pprefs = O.prefs mempty
+
+createEnvironment :: IO Env
+createEnvironment = do
+  options@Options{inFile} <- getOptions
+  unless (anyInfo options) $
+    failWithHelp "Please specify at least one of '--padding', '--uses', or '--sizeof'"
+  let output = stdout
+  input <- case inFile of
+    "-" -> pure stdin
+    "" -> failWithHelp "Empty input file name"
+    _ -> openFile inFile ReadMode
+  let handles = Handles{..}
+  pure $ Env{..}
 
 data Field
   = FieldNamed
@@ -100,29 +150,8 @@ data QueryErr
 
 type QM = MultiExcept QueryErr
 
-data Handles
-  = Handles
-  { input  :: Handle
-  , output :: Handle
-  }
-
-anyInfo :: Options -> Bool
-anyInfo Options{..} = or debug
-  where
-    debug :: [Bool]
-    debug = [padding, uses, sizeof]
-
 main :: IO ()
-main = do
-  options <- getOptions
-  if anyInfo options
-  then run options $ Handles stdin stdout
-  else do
-    B.putStr "Error: Please specify at least one of '--padding', '--uses', or '--sizeof'\n\n"
-    O.handleParseResult . O.Failure $ O.parserFailure pprefs optInfo (O.ShowHelpText Nothing) mempty
-
-pprefs :: O.ParserPrefs
-pprefs = O.prefs mempty
+main = createEnvironment >>= run
 
 cFile :: FilePath
 cFile = ".struct.debug.c"
@@ -130,8 +159,8 @@ cFile = ".struct.debug.c"
 ifThenElse :: Bool -> a -> a -> a
 ifThenElse c a b = if c then a else b
 
-cPrelude :: Options -> B.ByteString
-cPrelude Options{..} = B.intercalate "\n"
+cPrelude :: Env -> B.ByteString
+cPrelude Env{options = Options{..}} = B.intercalate "\n"
   $ colors <>
   [ "#include <stdio.h>"
   , "// End of prelude\n\n"
@@ -164,8 +193,8 @@ cPrelude Options{..} = B.intercalate "\n"
       ]
   
 
-run :: Options -> Handles -> IO ()
-run opts Handles{..} = do
+run :: Env -> IO ()
+run env@Env{handles = Handles{..}} = do
   source <- hGetContents input
   cc <- getEnv "CC"
   dir <- getCurrentDirectory
@@ -177,9 +206,9 @@ run opts Handles{..} = do
       Left errs -> traverse_ (hPrint stderr) errs
       Right structs -> do
         bracket (openFile cFile WriteMode) hClose $ \handle -> do
-          B.hPut handle $ cPrelude opts
+          B.hPut handle $ cPrelude env
           hPutStrLn handle source
-          hPutStrLn handle $ mkDebugger opts structs
+          hPutStrLn handle $ mkDebugger env structs
         callCommand $ intercalate " "
           [ cc
           , cFile
@@ -187,10 +216,10 @@ run opts Handles{..} = do
         callProcess (dir </> "a.out") []
 
 
-mkDebugger :: Options -> [Struct] -> String
-mkDebugger opts structs
+mkDebugger :: Env -> [Struct] -> String
+mkDebugger env structs
   =  "int main(void) {\n"
-  <> concatMap (debugStruct opts) structs
+  <> concatMap (debugStruct env) structs
   <> "}"
 
 structName :: String
@@ -199,8 +228,8 @@ structName = "__s"
 debugPrint :: Bool
 debugPrint = False
 
-printSizePaths :: Options -> Int -> String -> String -> String
-printSizePaths Options{..} n path nextPath
+printSizePaths :: Env -> Int -> String -> String -> String
+printSizePaths Env{options = Options{..}} n path nextPath
    =  "    {\n"
    <> "      size_t __size_of = sizeof(" <> path <> ");\n"
    <> "      size_t __uses    = ((size_t)&" <> nextPath <> ") - ((size_t)&" <> path <> ");\n"
@@ -235,13 +264,13 @@ printSizePaths Options{..} n path nextPath
         <> "      printf(\"// padding: %s%zu\" RESET \"\\n\", __padding > 0 ? RED : GREEN, __padding);\n"
       else ""
 
-debugStruct' :: Options -> Bool -> String -> [Field] -> String
-debugStruct' opts istypedef s fields
+debugStruct' :: Env -> Bool -> String -> [Field] -> String
+debugStruct' env istypedef s fields
   =  "  {\n"
   <> decl
   <> "    printf(\"// sizeof: %zu\\n\", sizeof(" <> path <> "));\n"
   <> start
-  <> printSubs opts 0 path nextPath fields
+  <> printSubs env 0 path nextPath fields
   <> end
   <> "  }\n"
   where
@@ -266,9 +295,9 @@ debugStruct' opts istypedef s fields
       then "    puts(\"} " <> s <> ";\\n\");\n"
       else "    puts(\"};\\n\");\n"
 
-debugStruct :: Options -> Struct -> String
-debugStruct opts (Struct s fs) = debugStruct' opts False s fs
-debugStruct opts (TypedefStruct s fs) = debugStruct' opts True s fs
+debugStruct :: Env -> Struct -> String
+debugStruct env (Struct s fs) = debugStruct' env False s fs
+debugStruct env (TypedefStruct s fs) = debugStruct' env True s fs
 
 printIndent :: Int -> String
 printIndent 0 = ""
@@ -291,9 +320,9 @@ firstPath = \case
 (<.>) :: String -> String -> String
 (<.>) a b = a <> "." <> b
 
-printSubs :: Options -> Int -> String -> String -> [Field] -> String
-printSubs opts n path nextPath fields =
-  concat $ zipWith (flip (debugField opts (n + 2) path)) fields nexts
+printSubs :: Env -> Int -> String -> String -> [Field] -> String
+printSubs env n path nextPath fields =
+  concat $ zipWith (flip (debugField env (n + 2) path)) fields nexts
   where
     nexts :: [String]
     nexts = reverse $ scanl' f nextPath $ reverse $ tail $ fieldFirsts
@@ -305,39 +334,39 @@ printSubs opts n path nextPath fields =
     fieldFirsts :: [Maybe String]
     fieldFirsts = fmap (path <.>) . firstPath <$> fields
 
-printSubsUnion :: Options -> Int -> String -> String -> [Field] -> String
-printSubsUnion opts n path nextPath fields =
-  concatMap (debugField opts (n + 2) path nextPath) fields
+printSubsUnion :: Env -> Int -> String -> String -> [Field] -> String
+printSubsUnion env n path nextPath fields =
+  concatMap (debugField env (n + 2) path nextPath) fields
 
-debugField :: Options -> Int -> String -> String -> Field -> String
-debugField opts n path nextPath = \case
+debugField :: Env -> Int -> String -> String -> Field -> String
+debugField env n path nextPath = \case
   (FieldNamed name ts) ->
     let newPath = path <.> name
-     in printSizePaths opts n newPath nextPath
+     in printSizePaths env n newPath nextPath
        <> printIndent n
        <> "    puts(\"" <> PP.render (pretty ts) <> " " <> name <> ";\");\n"
   FieldAnonymousStruct{..} ->
     printIndent n
     <> "    puts(\"struct {\");\n"
-    <> printSubs opts n path nextPath inner
+    <> printSubs env n path nextPath inner
     <> printIndent n
     <> "    puts(\"};\");\n"
   FieldNamedStruct{..} ->
     printIndent n
     <> "    puts(\"struct {\");\n"
-    <> printSubs opts n (path <.> name) nextPath inner
+    <> printSubs env n (path <.> name) nextPath inner
     <> printIndent n
     <> "    puts(\"} " <> name <> ";\");\n"
   FieldAnonymousUnion{..} ->
     printIndent n
     <> "    puts(\"union {\");\n"
-    <> printSubsUnion opts n path nextPath inner
+    <> printSubsUnion env n path nextPath inner
     <> printIndent n
     <> "    puts(\"};\");\n"
   FieldNamedUnion{..} ->
     printIndent n
     <> "    puts(\"union {\");\n"
-    <> printSubsUnion opts n (path <.> name) nextPath inner
+    <> printSubsUnion env n (path <.> name) nextPath inner
     <> printIndent n
     <> "    puts(\"} " <> name <> ";\");\n"
 
