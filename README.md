@@ -15,7 +15,7 @@ This is a tool used to generate reports on how your structs and fields are packe
 ## Usage 
 
 ```
-$ cat test.c | cabal v2-run
+$ cat test.c | cabal v2-run struct-inspector -- --padding
 ```
 
 ## Example output

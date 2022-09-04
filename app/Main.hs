@@ -232,7 +232,7 @@ printSizePaths Options{..} n path nextPath
     printPadding :: String
     printPadding = if padding
       then "  " <> printIndent n
-        <> "      printf(\"// padding: %s%zu\" RESET \"\\n\", __padding > 0 ? RED : \"\", __padding);\n"
+        <> "      printf(\"// padding: %s%zu\" RESET \"\\n\", __padding > 0 ? RED : GREEN, __padding);\n"
       else ""
 
 debugStruct' :: Options -> Bool -> String -> [Field] -> String
