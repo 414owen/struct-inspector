@@ -53,12 +53,13 @@ optionsParser = Options
     <> O.help "Don't output color")
 
 getOptions :: IO Options
-getOptions = O.execParser opts
-  where
-    opts = O.info (optionsParser <**> O.helper)
-      ( O.fullDesc
-     <> O.progDesc "Print structure padding and field size info"
-     <> O.header "Struct Inspector" )
+getOptions = O.execParser optInfo
+
+optInfo :: O.ParserInfo Options
+optInfo = O.info (optionsParser <**> O.helper)
+  ( O.fullDesc
+  <> O.progDesc "Print structure padding and field size info"
+  <> O.header "Struct Inspector" )
 
 data Field
   = FieldNamed
@@ -105,10 +106,23 @@ data Handles
   , output :: Handle
   }
 
+anyInfo :: Options -> Bool
+anyInfo Options{..} = or debug
+  where
+    debug :: [Bool]
+    debug = [padding, uses, sizeof]
+
 main :: IO ()
 main = do
   options <- getOptions
-  run options $ Handles stdin stdout
+  if anyInfo options
+  then run options $ Handles stdin stdout
+  else do
+    B.putStr "Error: Please specify at least one of '--padding', '--uses', or '--sizeof'\n\n"
+    O.handleParseResult . O.Failure $ O.parserFailure pprefs optInfo (O.ShowHelpText Nothing) mempty
+
+pprefs :: O.ParserPrefs
+pprefs = O.prefs mempty
 
 cFile :: FilePath
 cFile = ".struct.debug.c"
