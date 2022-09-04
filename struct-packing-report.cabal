@@ -18,5 +18,6 @@ executable struct-packing-report
                     , directory
                     , filepath
                     , utf8-string
+                    , optparse-applicative
     hs-source-dirs:   app
     default-language: Haskell2010

@@ -1,13 +1,14 @@
-{-# LANGUAGE ApplicativeDo #-}
+{-# LANGUAGE ApplicativeDo         #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase            #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
 
 module Main (main) where
 
-import           Control.Applicative             (Alternative(..), (<|>))
+import           Control.Arrow (second)
+import           Control.Applicative             (Alternative(..), (<|>), (<**>))
 import           Control.Applicative.MultiExcept
 import           Control.Exception               (bracket)
 import qualified Data.ByteString                 as B
@@ -19,12 +20,45 @@ import           Data.List.NonEmpty              (NonEmpty(..))
 import           Data.Maybe                      (catMaybes)
 import           Language.C
 import           Language.C.Data.Ident
+import           Options.Applicative             (Parser)
+import qualified Options.Applicative             as O
 import           System.Directory                (getCurrentDirectory)
 import           System.Environment
 import           System.FilePath                 ((</>))
 import           System.IO
 import           System.Process
 import qualified Text.PrettyPrint                as PP
+
+data Options
+  = Options
+  { sizeof  :: Bool
+  , uses    :: Bool
+  , padding :: Bool
+  , noColor :: Bool
+  } deriving Show
+
+optionsParser :: Parser Options
+optionsParser = Options
+  <$> O.switch
+    ( O.long "sizeof"
+    <> O.help "Output size of fields (excluding padding)")
+  <*> O.switch
+    ( O.long "uses"
+    <> O.help "Output bytes used by field (including padding)")
+  <*> O.switch
+    ( O.long "padding"
+    <> O.help "Output bytes of padding that follow a field")
+  <*> O.switch
+    ( O.long "no-color"
+    <> O.help "Don't output color")
+
+getOptions :: IO Options
+getOptions = O.execParser opts
+  where
+    opts = O.info (optionsParser <**> O.helper)
+      ( O.fullDesc
+     <> O.progDesc "Print structure padding and field size info"
+     <> O.header "Struct Inspector" )
 
 data Field
   = FieldNamed
@@ -72,17 +106,52 @@ data Handles
   }
 
 main :: IO ()
-main = run $ Handles stdin stdout
+main = do
+  options <- getOptions
+  run options $ Handles stdin stdout
 
 cFile :: FilePath
 cFile = ".struct.debug.c"
 
-cPrelude :: B.ByteString
-cPrelude = "#include <stdio.h>\n\n"
-  <> "// End of prelude\n\n"
+ifThenElse :: Bool -> a -> a -> a
+ifThenElse c a b = if c then a else b
 
-run :: Handles -> IO ()
-run Handles{..} = do
+cPrelude :: Options -> B.ByteString
+cPrelude Options{..} = B.intercalate "\n"
+  $ colors <>
+  [ "#include <stdio.h>"
+  , "// End of prelude\n\n"
+  ]
+  where
+    colors :: [B.ByteString]
+    colors
+      = ("#define " <>)
+      . (uncurry (<>))
+      . second (" " <>)
+      . (second $ ifThenElse noColor "\"\"")
+      <$>
+      [ ("RESET", "\"\\033[0m\"")
+      , ("BLACK", "\"\\033[30m\"")
+      , ("RED", "\"\\033[31m\"")
+      , ("GREEN", "\"\\033[32m\"")
+      , ("YELLOW", "\"\\033[33m\"")
+      , ("BLUE", "\"\\033[34m\"")
+      , ("MAGENTA", "\"\\033[35m\"")
+      , ("CYAN", "\"\\033[36m\"")
+      , ("WHITE", "\"\\033[37m\"")
+      , ("BOLDBLACK", "\"\\033[1m\\033[30m\"")
+      , ("BOLDRED", "\"\\033[1m\\033[31m\"")
+      , ("BOLDGREEN", "\"\\033[1m\\033[32m\"")
+      , ("BOLDYELLOW", "\"\\033[1m\\033[33m\"")
+      , ("BOLDBLUE", "\"\\033[1m\\033[34m\"")
+      , ("BOLDMAGENTA", "\"\\033[1m\\033[35m\"")
+      , ("BOLDCYAN", "\"\\033[1m\\033[36m\"")
+      , ("BOLDWHITE", "\"\\033[1m\\033[37m\"")
+      ]
+  
+
+run :: Options -> Handles -> IO ()
+run opts Handles{..} = do
   source <- hGetContents input
   cc <- getEnv "CC"
   dir <- getCurrentDirectory
@@ -94,19 +163,20 @@ run Handles{..} = do
       Left errs -> traverse_ (hPrint stderr) errs
       Right structs -> do
         bracket (openFile cFile WriteMode) hClose $ \handle -> do
-          B.hPut handle cPrelude
+          B.hPut handle $ cPrelude opts
           hPutStrLn handle source
-          hPutStrLn handle $ mkDebugger structs
+          hPutStrLn handle $ mkDebugger opts structs
         callCommand $ intercalate " "
           [ cc
           , cFile
           ]
         callProcess (dir </> "a.out") []
 
-mkDebugger :: [Struct] -> String
-mkDebugger structs
+
+mkDebugger :: Options -> [Struct] -> String
+mkDebugger opts structs
   =  "int main(void) {\n"
-  <> concatMap debugStruct structs
+  <> concatMap (debugStruct opts) structs
   <> "}"
 
 structName :: String
@@ -115,27 +185,49 @@ structName = "__s"
 debugPrint :: Bool
 debugPrint = False
 
-printSizePaths :: Int -> String -> String -> String
-printSizePaths n path nextPath
-   =  printIndent n
-   <> "    printf(\"// sizeof: %zu\\n\", sizeof(" <> path <> "));\n"
-   <> printIndent n
-   <> "    printf(\"// uses: %zu\\n\", ((size_t)&" <> nextPath <> ") - ((size_t)&" <> path <> "));\n"
-   <> if not debugPrint then "" else db
+printSizePaths :: Options -> Int -> String -> String -> String
+printSizePaths Options{..} n path nextPath
+   =  "    {\n"
+   <> "      size_t __size_of = sizeof(" <> path <> ");\n"
+   <> "      size_t __uses    = ((size_t)&" <> nextPath <> ") - ((size_t)&" <> path <> ");\n"
+   <> "      size_t __padding = __uses - __size_of;\n"
+   <> printSizeof
+   <> printUses
+   <> printPadding
+   <> db
+   <> "    }\n"
   where
     db :: String
-    db = printIndent n
-      <> "    printf(\"// path: " <> path <> "\\n\");\n"
-      <> printIndent n
-      <> "    printf(\"// nextPath: " <> nextPath <> "\\n\");\n"
+    db = if debugPrint
+      then printIndent n
+        <> "    printf(\"// path: " <> path <> "\\n\");\n"
+        <> printIndent n
+        <> "    printf(\"// nextPath: " <> nextPath <> "\\n\");\n"
+      else ""
 
-debugStruct' :: Bool -> String -> [Field] -> String
-debugStruct' istypedef s fields
+    printSizeof :: String
+    printSizeof = if sizeof
+      then "  " <> printIndent n <> "      printf(\"// sizeof: %zu\\n\", __size_of);\n"
+      else ""
+
+    printUses :: String
+    printUses = if sizeof
+      then "  " <> printIndent n <> "      printf(\"// uses: %zu\\n\", __uses);\n"
+      else ""
+
+    printPadding :: String
+    printPadding = if padding
+      then "  " <> printIndent n
+        <> "      printf(\"// padding: %s%zu\" RESET \"\\n\", __padding > 0 ? RED : \"\", __padding);\n"
+      else ""
+
+debugStruct' :: Options -> Bool -> String -> [Field] -> String
+debugStruct' opts istypedef s fields
   =  "  {\n"
   <> decl
-  <> printSizePaths 0 path nextPath
+  <> printSizePaths opts 0 path nextPath
   <> start
-  <> printSubs 0 path nextPath fields
+  <> printSubs opts 0 path nextPath fields
   <> end
   <> "  }\n"
   where
@@ -160,9 +252,9 @@ debugStruct' istypedef s fields
       then "    puts(\"} " <> s <> ";\\n\");\n"
       else "    puts(\"};\\n\");\n"
 
-debugStruct :: Struct -> String
-debugStruct (Struct s fs) = debugStruct' False s fs
-debugStruct (TypedefStruct s fs) = debugStruct' True s fs
+debugStruct :: Options -> Struct -> String
+debugStruct opts (Struct s fs) = debugStruct' opts False s fs
+debugStruct opts (TypedefStruct s fs) = debugStruct' opts True s fs
 
 printIndent :: Int -> String
 printIndent 0 = ""
@@ -185,9 +277,9 @@ firstPath = \case
 (<.>) :: String -> String -> String
 (<.>) a b = a <> "." <> b
 
-printSubs :: Int -> String -> String -> [Field] -> String
-printSubs n path nextPath fields =
-  concat $ zipWith (flip (debugField (n + 2) path)) fields nexts
+printSubs :: Options -> Int -> String -> String -> [Field] -> String
+printSubs opts n path nextPath fields =
+  concat $ zipWith (flip (debugField opts (n + 2) path)) fields nexts
   where
     nexts :: [String]
     nexts = reverse $ scanl' f nextPath $ reverse $ tail $ fieldFirsts
@@ -199,39 +291,39 @@ printSubs n path nextPath fields =
     fieldFirsts :: [Maybe String]
     fieldFirsts = fmap (path <.>) . firstPath <$> fields
 
-printSubsUnion :: Int -> String -> String -> [Field] -> String
-printSubsUnion n path nextPath fields =
-  concatMap (debugField (n + 2) path nextPath) fields 
+printSubsUnion :: Options -> Int -> String -> String -> [Field] -> String
+printSubsUnion opts n path nextPath fields =
+  concatMap (debugField opts (n + 2) path nextPath) fields
 
-debugField :: Int -> String -> String -> Field -> String
-debugField n path nextPath = \case
+debugField :: Options -> Int -> String -> String -> Field -> String
+debugField opts n path nextPath = \case
   (FieldNamed name ts) ->
     let newPath = path <.> name
-     in printSizePaths n newPath nextPath
+     in printSizePaths opts n newPath nextPath
        <> printIndent n
-       <> "    printf(\"" <> PP.render (pretty ts) <> " " <> name <> ";\\n\");"
+       <> "    puts(\"" <> PP.render (pretty ts) <> " " <> name <> ";\");\n"
   FieldAnonymousStruct{..} ->
     printIndent n
     <> "    puts(\"struct {\");\n"
-    <> printSubs n path nextPath inner
+    <> printSubs opts n path nextPath inner
     <> printIndent n
     <> "    puts(\"};\");\n"
   FieldNamedStruct{..} ->
     printIndent n
     <> "    puts(\"struct {\");\n"
-    <> printSubs n (path <.> name) nextPath inner
+    <> printSubs opts n (path <.> name) nextPath inner
     <> printIndent n
     <> "    puts(\"} " <> name <> ";\");\n"
   FieldAnonymousUnion{..} ->
     printIndent n
     <> "    puts(\"union {\");\n"
-    <> printSubsUnion n path nextPath inner
+    <> printSubsUnion opts n path nextPath inner
     <> printIndent n
     <> "    puts(\"};\");\n"
   FieldNamedUnion{..} ->
     printIndent n
     <> "    puts(\"union {\");\n"
-    <> printSubsUnion n (path <.> name) nextPath inner
+    <> printSubsUnion opts n (path <.> name) nextPath inner
     <> printIndent n
     <> "    puts(\"} " <> name <> ";\");\n"
 
