@@ -169,7 +169,7 @@ run opts Handles{..} = do
   source <- hGetContents input
   cc <- getEnv "CC"
   dir <- getCurrentDirectory
-  putStrLn $ "Using C compiler ($CC): " <> cc
+  -- putStrLn $ "Using C compiler ($CC): " <> cc
   preprocessed <- readProcess "cc" ["-std=c11", "-E", "-"] source
   case parseC (BSU.fromString preprocessed) $ initPos "stdin" of
     Left err -> hPrint stderr err
@@ -239,7 +239,7 @@ debugStruct' :: Options -> Bool -> String -> [Field] -> String
 debugStruct' opts istypedef s fields
   =  "  {\n"
   <> decl
-  <> printSizePaths opts 0 path nextPath
+  <> "    printf(\"// sizeof: %zu\\n\", sizeof(" <> path <> "));\n"
   <> start
   <> printSubs opts 0 path nextPath fields
   <> end
