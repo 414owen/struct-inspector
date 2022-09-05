@@ -33,12 +33,23 @@ import qualified Text.PrettyPrint                as PP
 
 data Options
   = Options
-  { sizeof  :: Bool
-  , uses    :: Bool
-  , padding :: Bool
-  , noColor :: Bool
-  , inFile  :: FilePath
+  { sizeof           :: Bool
+  , uses             :: Bool
+  , padding          :: Bool
+  , noColor          :: Bool
+  , inFile           :: FilePath
+  , nonZeroOnPadding :: Bool
   } deriving Show
+
+defaultOptions :: Options
+defaultOptions = Options
+  { sizeof           = False
+  , uses             = False
+  , padding          = True
+  , noColor          = False
+  , inFile           = "tests/kitchen-sink.c"
+  , nonZeroOnPadding = True
+  }
 
 data Handles
   = Handles
@@ -56,21 +67,30 @@ optionsParser :: Parser Options
 optionsParser = Options
   <$> O.switch
     ( O.long "sizeof"
+    <> O.short 's'
     <> O.help "Output size of fields (excluding padding)")
   <*> O.switch
     ( O.long "uses"
+    <> O.short 'u'
     <> O.help "Output bytes used by field (including padding)")
   <*> O.switch
     ( O.long "padding"
+    <> O.short 'p'
     <> O.help "Output bytes of padding that follow a field")
   <*> O.switch
     ( O.long "no-color"
+    <> O.short 'n'
     <> O.help "Don't output color")
   <*> O.strOption
     ( O.long "input"
+    <> O.short 'i'
     <> O.metavar "FILE"
     <> O.help "Input file (default is stdin)"
     <> O.value "-"
+    )
+  <*> O.switch
+    ( O.long "nonzero-on-padding"
+    <> O.short 'z'
     )
 
 getOptions :: IO Options
@@ -98,9 +118,8 @@ anyInfo Options{..} = or debug
 pprefs :: O.ParserPrefs
 pprefs = O.prefs mempty
 
-createEnvironment :: IO Env
-createEnvironment = do
-  options@Options{inFile} <- getOptions
+environmentFromOptions :: Options -> IO Env
+environmentFromOptions options@Options{inFile} = do
   unless (anyInfo options) $
     failWithHelp "Please specify at least one of '--padding', '--uses', or '--sizeof'"
   let output = stdout
@@ -110,6 +129,9 @@ createEnvironment = do
     _ -> openFile inFile ReadMode
   let handles = Handles{..}
   pure $ Env{..}
+
+createEnvironment :: IO Env
+createEnvironment = getOptions >>= environmentFromOptions
 
 data Field
   = FieldNamed
@@ -217,6 +239,8 @@ run env@Env{handles = Handles{..}} = do
           hPutStrLn handle $ mkDebugger env structs
         callCommand $ intercalate " "
           [ cc
+          , "-O0"
+          , "-s"
           , cFile
           ]
         callProcess (dir </> "a.out") []
@@ -225,7 +249,9 @@ run env@Env{handles = Handles{..}} = do
 mkDebugger :: Env -> [Struct] -> String
 mkDebugger env structs
   =  "int main(void) {\n"
+  <> "  int __exit_code = 0;\n"
   <> concatMap (debugStruct env) structs
+  <> "  return __exit_code;\n"
   <> "}"
 
 structName :: String
@@ -240,6 +266,7 @@ printSizePaths Env{options = Options{..}} n path nextPath
    <> "      size_t __size_of = sizeof(" <> path <> ");\n"
    <> "      size_t __uses    = ((size_t)&" <> nextPath <> ") - ((size_t)&" <> path <> ");\n"
    <> "      size_t __padding = __uses - __size_of;\n"
+   <> exitPadding
    <> printSizeof
    <> printUses
    <> printPadding
@@ -268,6 +295,11 @@ printSizePaths Env{options = Options{..}} n path nextPath
     printPadding = if padding
       then "  " <> printIndent n
         <> "      printf(\"// padding: %s%zu\" RESET \"\\n\", __padding > 0 ? RED : GREEN, __padding);\n"
+      else ""
+
+    exitPadding :: String
+    exitPadding = if nonZeroOnPadding
+      then "      if (__padding > 0) { __exit_code = 1; }\n"
       else ""
 
 debugStruct' :: Env -> Bool -> String -> [Field] -> String
