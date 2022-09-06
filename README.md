@@ -40,11 +40,6 @@ struct a {
 };
 ```
 
-**Key**:
-
-**Sizeof**: bytes the element consumes
-**Uses**: bytes the element consumes plus trailing padding
-
 **File**: tests/good.c
 
 ```
