@@ -15,8 +15,11 @@ This is a tool used to generate reports on how your structs and fields are packe
 ## Usage 
 
 ```
-$ cat test.c | cabal v2-run struct-inspector -- --padding
+$ cabal v2-run struct-inspector -- -p -i tests/bad.c
 ```
+
+This prints out field padding only.
+A few other options are available with `--help`.
 
 ## Example output
 
@@ -24,6 +27,7 @@ $ cat test.c | cabal v2-run struct-inspector -- --padding
 
 ```
 // sizeof: 24
+// total struct padding: 8
 struct a {
   struct {
     // padding: 4
@@ -45,6 +49,7 @@ struct a {
 
 ```
 // sizeof: 16
+// total struct padding: 0
 struct a {
   // padding: 0
   size_t b;
