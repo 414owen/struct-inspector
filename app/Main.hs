@@ -247,12 +247,20 @@ run env@Env{handles = Handles{..}} = do
 
 
 mkDebugger :: Env -> [Struct] -> String
-mkDebugger env structs
+mkDebugger env@Env{options = Options{..}} structs
   =  "int main(void) {\n"
-  <> "  int __exit_code = 0;\n"
+  <> strif nonZeroOnPadding "  int __exit_code = 0;\n"
+  <> out
   <> concatMap (debugStruct env) structs
-  <> "  return __exit_code;\n"
+  <> strif nonZeroOnPadding "  return __exit_code;\n"
   <> "}"
+  where
+    out :: String
+    out 
+      =  strif (indirect env)
+      $  "  FILE *__out = stdout;\n"
+      <> "  char *__struct_out_string;\n"
+      <> "  size_t __struct_out_size;\n"
 
 structName :: String
 structName = "__s"
@@ -260,12 +268,42 @@ structName = "__s"
 debugPrint :: Bool
 debugPrint = False
 
+strif :: Bool -> String -> String
+strif b s = if b then s else ""
+
+indirect :: Env -> Bool
+indirect Env{options = Options{..}} = padding
+
+{- The best Haskell printf implementation isn't some type level
+ - tomfoolery, it's to shell out to C. Thanks for coming to my
+ - Ted Talk.
+ -}
+printf :: Env -> Int -> String -> [String] -> String
+printf env n s args = replicate n ' ' <> start <> argsStr <> ");\n"
+  where
+    argsStr :: String
+    argsStr = show s <> ", " <> intercalate ", " args
+
+    start :: String
+    start = if indirect env
+      then "fprintf(__out, "
+      else "printf("
+
+puts :: Env -> Int -> String -> String
+puts env n s = replicate n ' ' <> start <> show s <> ");\n"
+  where
+    start :: String
+    start = if indirect env
+      then "fprintf(__out, \"%s\\n\", "
+      else "puts("
+
 printSizePaths :: Env -> Int -> String -> String -> String
-printSizePaths Env{options = Options{..}} n path nextPath
+printSizePaths env@Env{options = Options{..}} n path nextPath
    =  "    {\n"
    <> "      size_t __size_of = sizeof(" <> path <> ");\n"
    <> "      size_t __uses    = ((size_t)&" <> nextPath <> ") - ((size_t)&" <> path <> ");\n"
    <> "      size_t __padding = __uses - __size_of;\n"
+   <> strif padding "      __struct_total_padding += __padding;\n"
    <> exitPadding
    <> printSizeof
    <> printUses
@@ -275,43 +313,57 @@ printSizePaths Env{options = Options{..}} n path nextPath
   where
     db :: String
     db = if debugPrint
-      then printIndent n
-        <> "    printf(\"// path: " <> path <> "\\n\");\n"
-        <> printIndent n
-        <> "    printf(\"// nextPath: " <> nextPath <> "\\n\");\n"
+      then printIndent env 4 n
+        <> puts env 4 ("// path: " <> path <> "\n")
+        <> printIndent env 4 n
+        <> puts env 4 ("// nextPath: " <> nextPath <> "\n")
       else ""
 
     printSizeof :: String
-    printSizeof = if sizeof
-      then "  " <> printIndent n <> "      printf(\"// sizeof: %zu\\n\", __size_of);\n"
-      else ""
+    printSizeof
+      =  strif sizeof
+      $  printIndent env 6 n
+      <> printf env 6 "// sizeof: %zu\n" ["__size_of"]
 
     printUses :: String
-    printUses = if sizeof
-      then "  " <> printIndent n <> "      printf(\"// uses: %zu\\n\", __uses);\n"
-      else ""
+    printUses
+      =  strif uses
+      $  printIndent env 6 n
+      <> printf env 6 "// uses: %zu\n" ["__uses"]
 
     printPadding :: String
-    printPadding = if padding
-      then "  " <> printIndent n
-        <> "      printf(\"// padding: %s%zu\" RESET \"\\n\", __padding > 0 ? RED : GREEN, __padding);\n"
-      else ""
+    printPadding
+      = strif padding
+      $  printIndent env 6 n
+      <> printf env 6 "// padding: %s%zu%s\n" ["__padding > 0 ? RED : GREEN", "__padding", "RESET"]
 
     exitPadding :: String
-    exitPadding = if nonZeroOnPadding
-      then "      if (__padding > 0) { __exit_code = 1; }\n"
-      else ""
+    exitPadding
+      = strif nonZeroOnPadding
+      $ "      if (__padding > 0) { __exit_code = 1; }\n"
 
 debugStruct' :: Env -> Bool -> String -> [Field] -> String
-debugStruct' env istypedef s fields
+debugStruct' env@Env{options = Options{..}} istypedef s fields
   =  "  {\n"
+  <> strif padding "    size_t __struct_total_padding = 0;\n"
+  <> out
   <> decl
   <> "    printf(\"// sizeof: %zu\\n\", sizeof(" <> path <> "));\n"
   <> start
   <> printSubs env 0 path nextPath fields
   <> end
+  <> total
+  <> strif (indirect env) "    putc(0, __out);\n"
+  <> strif (indirect env) "    fclose(__out);\n"
+  <> strif (indirect env) "    printf(\"%s\", __struct_out_string);\n"
+  <> "    putc('\\n', stdout);\n"
   <> "  }\n"
   where
+    out :: String
+    out
+      =  strif padding
+      $  "    __out = open_memstream(&__struct_out_string, &__struct_out_size);\n"
+
     path :: String
     path = structName <> "[0]"
 
@@ -324,22 +376,32 @@ debugStruct' env istypedef s fields
       else ("    struct " <> s <> " " <> structName <> "[2];\n")
 
     start :: String
-    start = if istypedef
-      then "    puts(\"typedef struct {\");\n"
-      else "    puts(\"struct " <> s <> " {\");\n"
+    start = puts env 4 $ if istypedef
+      then "typedef struct {"
+      else "struct " <> s <> " {"
 
     end :: String
-    end = if istypedef
-      then "    puts(\"} " <> s <> ";\\n\");\n"
-      else "    puts(\"};\\n\");\n"
+    end = puts env 4 $ if istypedef
+      then "} " <> s <> ";"
+      else "};"
+
+    total :: String
+    total = strif padding
+      $  "    printf(\"// total struct padding: %s%zu%s\\n\""
+      <> ", __struct_total_padding > 0 ? RED : GREEN"
+      <> ", __struct_total_padding"
+      <> ", RESET);\n"
 
 debugStruct :: Env -> Struct -> String
 debugStruct env (Struct s fs) = debugStruct' env False s fs
 debugStruct env (TypedefStruct s fs) = debugStruct' env True s fs
 
-printIndent :: Int -> String
-printIndent 0 = ""
-printIndent n = "    printf(\"%" <> show n <> "s\", \"\");\n"
+printIndent :: Env -> Int -> Int -> String
+printIndent _ _ 0 = ""
+printIndent env n m = replicate n ' ' <>
+  if indirect env
+  then "fprintf(__out, \"%" <> show m <> "s\", \"\");\n"
+  else "printf(\"%" <> show m <> "s\", \"\");\n"
 
 altList :: (Foldable f, Alternative a) => f (a b) -> a b
 altList = foldl' (<|>) empty
@@ -381,32 +443,32 @@ debugField env n path nextPath = \case
   (FieldNamed name ts) ->
     let newPath = path <.> name
      in printSizePaths env n newPath nextPath
-       <> printIndent n
-       <> "    puts(\"" <> PP.render (pretty ts) <> " " <> name <> ";\");\n"
+       <> printIndent env 4 n
+       <> puts env 4 (PP.render (pretty ts) <> " " <> name <> ";")
   FieldAnonymousStruct{..} ->
-    printIndent n
-    <> "    puts(\"struct {\");\n"
+    printIndent env 4 n
+    <> puts env 4 "struct {"
     <> printSubs env n path nextPath inner
-    <> printIndent n
-    <> "    puts(\"};\");\n"
+    <> printIndent env 4 n
+    <> puts env 4 "};"
   FieldNamedStruct{..} ->
-    printIndent n
-    <> "    puts(\"struct {\");\n"
+    printIndent env 4 n
+    <> puts env 4 "struct {"
     <> printSubs env n (path <.> name) nextPath inner
-    <> printIndent n
-    <> "    puts(\"} " <> name <> ";\");\n"
+    <> printIndent env 4 n
+    <> puts env 4 ("} " <> name <> ";")
   FieldAnonymousUnion{..} ->
-    printIndent n
-    <> "    puts(\"union {\");\n"
+    printIndent env 4 n
+    <> puts env 4 "union {"
     <> printSubsUnion env n path nextPath inner
-    <> printIndent n
-    <> "    puts(\"};\");\n"
+    <> printIndent env 4 n
+    <> puts env 4 "};"
   FieldNamedUnion{..} ->
-    printIndent n
-    <> "    puts(\"union {\");\n"
+    printIndent env 4 n
+    <> puts env 4 "union {"
     <> printSubsUnion env n (path <.> name) nextPath inner
-    <> printIndent n
-    <> "    puts(\"} " <> name <> ";\");\n"
+    <> printIndent env 4 n
+    <> puts env 4 ("} " <> name <> ";")
 
 getStructsFromTranslUnit :: CTranslUnit -> QM [Struct]
 getStructsFromTranslUnit (CTranslUnit decls _) = concat <$> traverse getStructsFromExtDecl decls
