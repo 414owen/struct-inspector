@@ -4,6 +4,11 @@ version:            1.0.0
 author:             Owen Shepherd
 maintainer:         owen@owen.cafe
 extra-source-files: CHANGELOG.md
+synopsis:           Inspect the padding and size of C data declarations and their fields
+license:            BSD-3-Clause
+category:           Tooling
+description:        Inspect the padding and size of C data declarations and their fields.
+                    For more information see <https://github.com/414owen/struct-inspector>.
 
 executable struct-packing-report
     main-is:          Main.hs
