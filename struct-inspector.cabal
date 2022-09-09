@@ -9,7 +9,7 @@ category:           Tooling
 description:        Inspect the padding and size of C data declarations and their fields.
                     For more information see <https://github.com/414owen/struct-inspector>.
 
-executable struct-packing-report
+executable struct-inspector
     main-is:          Main.hs
     ghc-options:      -Wall
     build-depends:    base ^>=4.15.1.0

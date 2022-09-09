@@ -136,6 +136,7 @@ createEnvironment = getOptions >>= environmentFromOptions
 data Field
   = FieldNamed
     { name :: String
+    , declr :: CDeclr
     , typeSpec :: CTypeSpec
     }
   | FieldAnonymousStruct
@@ -440,11 +441,11 @@ printSubsUnion env n path nextPath fields =
 
 debugField :: Env -> Int -> String -> String -> Field -> String
 debugField env n path nextPath = \case
-  (FieldNamed name ts) ->
+  (FieldNamed name declr ts) ->
     let newPath = path <.> name
      in printSizePaths env n newPath nextPath
        <> printIndent env 4 n
-       <> puts env 4 (PP.render (pretty ts) <> " " <> name <> ";")
+       <> puts env 4 (PP.render (pretty ts) <> " " <> PP.render (pretty declr) <> ";")
   FieldAnonymousStruct{..} ->
     printIndent env 4 n
     <> puts env 4 "struct {"
@@ -527,7 +528,8 @@ fst3 (a, _, _) = a
 
 getFieldsFromDecl :: CDeclaration NodeInfo -> QM [Field]
 getFieldsFromDecl (CDecl specs trips _) =
-  let names = concatMap (getFieldsFromDeclarators . fst3) trips
+  let pairs = concatMap (getFieldsFromDeclarators . fst3) trips
+      (names, _) = unzip pairs
       typeNode = getTypeFromDeclSpecs specs
   in case typeNode of
     Nothing -> case names of
@@ -553,9 +555,9 @@ getFieldsFromDecl (CDecl specs trips _) =
       pure $ case names of
         [] -> [FieldAnonymousUnion fields]
         ns -> flip FieldNamedUnion fields <$> ns
-    Just t -> case names of
+    Just t -> case pairs of
       [] -> throwError $ NonStructFieldWithoutName
-      ns -> pure $ flip FieldNamed t <$> ns
+      ns -> pure $ uncurry FieldNamed <$> ns <*> pure t
 getFieldsFromDecl _ = pure []
 
 getTypeFromDeclSpecs :: [CDeclarationSpecifier NodeInfo] -> Maybe CTypeSpec
@@ -565,6 +567,6 @@ getTypeFromDeclSpec :: CDeclarationSpecifier NodeInfo -> Maybe CTypeSpec
 getTypeFromDeclSpec (CTypeSpec a) = Just a
 getTypeFromDeclSpec _ = Nothing
 
-getFieldsFromDeclarators :: Maybe (CDeclarator NodeInfo) -> [String]
-getFieldsFromDeclarators (Just (CDeclr (Just (Ident s _ _)) _ _ _ _)) = [s]
+getFieldsFromDeclarators :: Maybe (CDeclarator NodeInfo) -> [(String, CDeclr)]
+getFieldsFromDeclarators (Just declr@(CDeclr (Just (Ident s _ _)) _ _ _ _)) = [(s, declr)]
 getFieldsFromDeclarators _ = []
