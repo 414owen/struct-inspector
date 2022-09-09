@@ -3,7 +3,6 @@ name:               struct-inspector
 version:            1.0.0
 author:             Owen Shepherd
 maintainer:         owen@owen.cafe
-extra-source-files: CHANGELOG.md
 synopsis:           Inspect the padding and size of C data declarations and their fields
 license:            BSD-3-Clause
 category:           Tooling
