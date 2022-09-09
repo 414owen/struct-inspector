@@ -41,16 +41,6 @@ data Options
   , nonZeroOnPadding :: Bool
   } deriving Show
 
-defaultOptions :: Options
-defaultOptions = Options
-  { sizeof           = False
-  , uses             = False
-  , padding          = True
-  , noColor          = False
-  , inFile           = "tests/kitchen-sink.c"
-  , nonZeroOnPadding = True
-  }
-
 data Handles
   = Handles
   { input  :: Handle
